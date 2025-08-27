@@ -20,7 +20,7 @@ def pil_to_tensor(image):
     return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
 
 # --------------------------------------------------------------------
-# ★ Node 1: InteractivePanelCreator (多角形対応版) ★
+# ★ Node 1: InteractivePanelCreator (マスク直接出力版) ★
 # --------------------------------------------------------------------
 class InteractivePanelCreator:
     @classmethod
@@ -29,45 +29,72 @@ class InteractivePanelCreator:
             "required": {
                 "width": ("INT", {"default": 768, "min": 64, "max": 8192, "step": 8}),
                 "height": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}),
-                "frame_color_hex": ("STRING", {"default": "#000000"}), # 枠線は黒
-                "background_color_hex": ("STRING", {"default": "#FFFFFF"}), # 背景は白
+                "frame_color_hex": ("STRING", {"default": "#FFFFFF"}), # コマ（生成エリア）は白
+                "background_color_hex": ("STRING", {"default": "#000000"}), # 背景（枠線）は黒
                 "regions_json": ("STRING", {"multiline": True, "default": "[]", "widget": "hidden"}),
             }
         }
-    RETURN_TYPES = ("IMAGE",)
-    FUNCTION = "create_layout_image"
+    
+    # ★ 戻り値にMASKとINT(パネル数)を追加
+    RETURN_TYPES = ("IMAGE", "MASK", "INT")
+    RETURN_NAMES = ("layout_image", "mask_batch", "panel_count")
+    FUNCTION = "create_layout_and_masks"
     CATEGORY = "Manga Toolbox"
 
     def hex_to_bgr(self, h):
         h = h.lstrip('#')
         return tuple(int(h[i:i+2], 16) for i in (4, 2, 0)) # BGR
 
-    def create_layout_image(self, width, height, frame_color_hex, background_color_hex, regions_json):
+    def create_layout_and_masks(self, width, height, frame_color_hex, background_color_hex, regions_json):
         try:
+            # regionsリストの順番が、そのまま描画順（=コマ番号）になる
             regions = json.loads(regions_json)
         except json.JSONDecodeError:
             regions = []
 
+        # 1. コマ割り画像の生成 (これまで通り)
         bg_color, frame_color = self.hex_to_bgr(background_color_hex), self.hex_to_bgr(frame_color_hex)
         canvas_cv = np.full((height, width, 3), bg_color, dtype=np.uint8)
-
+        
+        # 2. マスクの生成 (★新しい処理)
+        mask_list = []
         if regions:
-            # 領域を逆順に描画して、リストの若い番号が手前に来るようにする
-            for region in reversed(regions):
+            # UIで描画した順番にマスクを作成していく
+            for region in regions:
+                # 新しい真っ黒なキャンバスを用意
+                single_mask_np = np.zeros((height, width), dtype=np.uint8)
+                
                 region_type = region.get("type", "rect")
                 if region_type == "rect" and all(k in region for k in ['x', 'y', 'w', 'h']):
                     x, y, w, h = int(region["x"]), int(region["y"]), int(region["w"]), int(region["h"])
                     if w > 0 and h > 0:
+                        # 画像とマスクの両方に描画
                         cv2.rectangle(canvas_cv, (x, y), (x + w, y + h), frame_color, -1)
+                        cv2.rectangle(single_mask_np, (x, y), (x + w, y + h), 255, -1)
                 elif region_type == "poly" and "points" in region and len(region["points"]) >= 3:
                     pts = np.array([[p['x'], p['y']] for p in region["points"]], np.int32).reshape((-1, 1, 2))
+                    # 画像とマスクの両方に描画
                     cv2.fillPoly(canvas_cv, [pts], frame_color)
+                    cv2.fillPoly(single_mask_np, [pts], 255)
 
+                mask_list.append(torch.from_numpy(single_mask_np.astype(np.float32) / 255.0))
+
+        # ComfyUIの形式に変換
         canvas_rgb = cv2.cvtColor(canvas_cv, cv2.COLOR_BGR2RGB)
-        return (torch.from_numpy(canvas_rgb.astype(np.float32) / 255.0).unsqueeze(0),)
+        image_tensor = torch.from_numpy(canvas_rgb.astype(np.float32) / 255.0).unsqueeze(0)
+
+        if not mask_list:
+            # コマが一つもない場合は、空のマスクとカウント0を返す
+            empty_mask = torch.zeros((1, height, width), dtype=torch.float32)
+            return (image_tensor, empty_mask, 0)
+
+        mask_batch = torch.stack(mask_list)
+        panel_count = len(mask_list)
+
+        return (image_tensor, mask_batch, panel_count)
 
 # --------------------------------------------------------------------
-# ★ Node 2: AssembleAndProgress (やり直し対応版) ★
+# Node 2: AssembleAndProgress (変更なし)
 # --------------------------------------------------------------------
 class AssembleAndProgress:
     output_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "output")
@@ -96,13 +123,12 @@ class AssembleAndProgress:
 
         if load_from_index == 0:
             canvas_tensor = base_image[0].clone()
-            if panel_index == 1: # 最初のステップなら古いデータを消去
-                shutil.rmtree(job_dir)
+            if panel_index == 1:
+                if os.path.exists(job_dir): shutil.rmtree(job_dir)
                 os.makedirs(job_dir, exist_ok=True)
         else:
             load_path = os.path.join(job_dir, f"composite_panel_{load_from_index}.png")
             if os.path.exists(load_path):
-                print(f"Loading previous state: {load_path}")
                 loaded_img = Image.open(load_path).convert("RGB")
                 canvas_tensor = pil_to_tensor(loaded_img)[0].to(device)
             else:
@@ -135,12 +161,12 @@ class AssembleAndProgress:
         return (canvas_tensor.unsqueeze(0),)
 
 # --------------------------------------------------------------------
-# Node 3: MangaPanelDetector_Ultimate
+# Node 3: MangaPanelDetector_Ultimate (変更なし、代替手段として残す)
 # --------------------------------------------------------------------
 class MangaPanelDetector_Ultimate:
     @classmethod
     def INPUT_TYPES(s):
-        return { "required": { "image": ("IMAGE",), "frame_color_hex": ("STRING", {"default": "#000000"}), "color_tolerance": ("INT", {"default": 10}), "gap_closing_scale": ("INT", {"default": 5}), "final_line_thickness": ("INT", {"default": 5}), "sort_panels_by": (["top-to-bottom", "left-to-right", "largest-first"],), "min_area": ("INT", {"default": 5000}), }}
+        return { "required": { "image": ("IMAGE",), "frame_color_hex": ("STRING", {"default": "#FFFFFF"}), "color_tolerance": ("INT", {"default": 10}), "gap_closing_scale": ("INT", {"default": 5}), "final_line_thickness": ("INT", {"default": 5}), "sort_panels_by": (["top-to-bottom", "left-to-right", "largest-first"],), "min_area": ("INT", {"default": 5000}), }}
     RETURN_TYPES, FUNCTION, CATEGORY = ("MASK", "INT"), "detect_panels", "Manga Toolbox"
     RETURN_NAMES = ("mask_batch", "panel_count")
     def hex_to_rgb(self, h): h = h.lstrip('#'); return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
@@ -152,8 +178,7 @@ class MangaPanelDetector_Ultimate:
         color_mask = cv2.inRange(base_img_cv2, lower, upper)
         closed_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, np.ones((gap_closing_scale, gap_closing_scale), np.uint8))
         final_frame_mask = cv2.dilate(closed_mask, np.ones((final_line_thickness, final_line_thickness), np.uint8), iterations=1)
-        inverted_mask = cv2.bitwise_not(final_frame_mask)
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(inverted_mask, 4, cv2.CV_32S)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(final_frame_mask, 4, cv2.CV_32S)
         panels_meta = [{'label_index': i, 'box': (stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP]), 'area': stats[i, cv2.CC_STAT_AREA]} for i in range(1, num_labels) if stats[i, cv2.CC_STAT_AREA] > min_area]
         if not panels_meta: return (torch.zeros((1, img_h, img_w), device=image.device), 0)
         if sort_panels_by == "largest-first": panels_meta.sort(key=lambda item: item['area'], reverse=True)
@@ -163,7 +188,7 @@ class MangaPanelDetector_Ultimate:
         return (torch.stack(mask_list), len(mask_list))
 
 # --------------------------------------------------------------------
-# Node 4: CropPanelForInpaint_Advanced
+# Node 4: CropPanelForInpaint_Advanced (変更なし)
 # --------------------------------------------------------------------
 class CropPanelForInpaint_Advanced:
     @classmethod
@@ -184,26 +209,21 @@ class CropPanelForInpaint_Advanced:
         return (masked_img[y1:y2+1, x1:x2+1, :].unsqueeze(0), mask[y1:y2+1, x1:x2+1].unsqueeze(0))
 
 # --------------------------------------------------------------------
-# Node 5: ConditionalLatentScaler_Final
+# Node 5: ConditionalLatentScaler_Final (変更なし)
 # --------------------------------------------------------------------
 class ConditionalLatentScaler_Final:
     @classmethod
     def INPUT_TYPES(s):
-        return {
-            "required": { "samples": ("LATENT",), "threshold_pixel_width": ("INT", {"default": 512}), "threshold_pixel_height": ("INT", {"default": 512}), "comparison_logic": (["AND (Both)", "OR (Either)"],), "scale_factor_if_small": ("FLOAT", {"default": 1.5}), "scale_factor_if_large": ("FLOAT", {"default": 1.0}), "upscale_method": (["bicubic", "bilinear", "nearest-exact"],), }
-        }
+        return { "required": { "samples": ("LATENT",), "threshold_pixel_width": ("INT", {"default": 512}), "threshold_pixel_height": ("INT", {"default": 512}), "comparison_logic": (["AND (Both)", "OR (Either)"],), "scale_factor_if_small": ("FLOAT", {"default": 1.5}), "scale_factor_if_large": ("FLOAT", {"default": 1.0}), "upscale_method": (["bicubic", "bilinear", "nearest-exact"],), } }
     RETURN_TYPES, FUNCTION, CATEGORY = ("LATENT", "STRING"), "scale", "Manga Toolbox"
     RETURN_NAMES = ("scaled_samples", "info")
     def scale(self, samples, threshold_pixel_width, threshold_pixel_height, comparison_logic, scale_factor_if_small, scale_factor_if_large, upscale_method):
         s, latent = samples.copy(), samples["samples"]
         if latent.shape[0] == 0: return (s, "Empty latent input.")
-        
         current_pixel_w, current_pixel_h = latent.shape[3] * 8, latent.shape[2] * 8
         is_small = (current_pixel_w < threshold_pixel_width and current_pixel_h < threshold_pixel_height) if comparison_logic == "AND (Both)" else (current_pixel_w < threshold_pixel_width or current_pixel_h < threshold_pixel_height)
         scale_factor = scale_factor_if_small if is_small else scale_factor_if_large
-        
         if scale_factor == 1.0: return (s, f"Not scaled. Current: {current_pixel_w}x{current_pixel_h}")
-
         new_h, new_w = int(latent.shape[2] * scale_factor), int(latent.shape[3] * scale_factor)
         s["samples"] = F.interpolate(latent, size=(new_h, new_w), mode=upscale_method)
         return (s, f"Scaled by x{scale_factor:.2f}. From {current_pixel_w}x{current_pixel_h} -> {new_w*8}x{new_h*8}")
