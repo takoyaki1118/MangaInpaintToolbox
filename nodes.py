@@ -233,6 +233,101 @@ class ConditionalLatentScaler_Final:
         new_h, new_w = int(latent.shape[2] * scale_factor), int(latent.shape[3] * scale_factor); s["samples"] = F.interpolate(latent, size=(new_h, new_w), mode=upscale_method); return (s, f"Scaled by x{scale_factor:.2f}. From {current_pixel_w}x{current_pixel_h} -> {new_w*8}x{new_h*8}")
 
 # --------------------------------------------------------------------
+# ★ Node 5.5: LatentTargetScaler_Pro (Match Area モード追加 - 最終版) ★
+# --------------------------------------------------------------------
+class LatentTargetScaler_Pro:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "samples": ("LATENT",),
+                "target_width": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}),
+                "target_height": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}),
+                "upper_bound_allowance": ("FLOAT", {"default": 1.3, "min": 1.0, "max": 3.0, "step": 0.05}),
+                # ★★ 3つのモードに進化 ★★
+                "fit_mode": (["Fit Within (Safe)", "Fill Outside (Max Stretch)", "Match Area (Optimal)"],),
+                "upscale_if_smaller": ("BOOLEAN", {"default": True}),
+                "downscale_if_larger": ("BOOLEAN", {"default": True}),
+            }
+        }
+    
+    RETURN_TYPES = ("LATENT", "STRING")
+    RETURN_NAMES = ("scaled_samples", "info")
+    FUNCTION = "scale_to_target"
+    CATEGORY = "Manga Toolbox"
+
+    def scale_to_target(self, samples, target_width, target_height, upper_bound_allowance, fit_mode, upscale_if_smaller, downscale_if_larger):
+        s = samples.copy()
+        latent = samples["samples"]
+        
+        if latent.shape[0] == 0:
+            return (s, "Empty latent input.")
+
+        current_pixel_h = latent.shape[2] * 8
+        current_pixel_w = latent.shape[3] * 8
+        
+        if current_pixel_w == 0 or current_pixel_h == 0:
+            return (s, "Error: Current size is zero.")
+
+        # ★★ モードに応じたスケール計算ロジック ★★
+        scale_to_hit_target = 1.0
+        if fit_mode == "Fit Within (Safe)":
+            scale_w = target_width / current_pixel_w
+            scale_h = target_height / current_pixel_h
+            scale_to_hit_target = min(scale_w, scale_h)
+        elif fit_mode == "Fill Outside (Max Stretch)":
+            scale_w = target_width / current_pixel_w
+            scale_h = target_height / current_pixel_h
+            scale_to_hit_target = max(scale_w, scale_h)
+        elif fit_mode == "Match Area (Optimal)":
+            target_area = target_width * target_height
+            current_area = current_pixel_w * current_pixel_h
+            if current_area > 0:
+                scale_to_hit_target = (target_area / current_area) ** 0.5
+
+        final_scale = 1.0
+        info_message = ""
+
+        if scale_to_hit_target > 1.0:
+            if upscale_if_smaller:
+                final_scale = scale_to_hit_target
+                info_message = f"Upscaling to {fit_mode}. "
+            else: info_message = f"Not scaled (upscaling disabled). "
+        elif scale_to_hit_target < 1.0:
+            is_too_large = (current_pixel_w > target_width * upper_bound_allowance) or \
+                           (current_pixel_h > target_height * upper_bound_allowance)
+            if is_too_large:
+                if downscale_if_larger:
+                    final_scale = scale_to_hit_target
+                    info_message = f"Downscaling (exceeds {upper_bound_allowance}x allowance). "
+                else: info_message = f"Not scaled (downscaling disabled). "
+            else: info_message = f"Not downscaled (within {upper_bound_allowance}x allowance). "
+
+        if abs(final_scale - 1.0) < 0.01: # ほぼスケールしない場合は処理をスキップ
+            final_scale = 1.0
+            info_message = "Not scaled (already optimal size). "
+
+        if final_scale == 1.0:
+            info = info_message + f"Current: {current_pixel_w}x{current_pixel_h}"
+            return (s, info)
+
+        new_latent_h = int(latent.shape[2] * final_scale)
+        new_latent_w = int(latent.shape[3] * final_scale)
+        new_latent_h = (new_latent_h // 8) * 8
+        new_latent_w = (new_latent_w // 8) * 8
+
+        if new_latent_h == 0 or new_latent_w == 0:
+             return (s, f"Error: Calculated new size is zero. From {current_pixel_w}x{current_pixel_h}")
+
+        s["samples"] = F.interpolate(latent, size=(new_latent_h, new_latent_w), mode='bicubic', align_corners=False)
+        
+        new_pixel_h = new_latent_h * 8
+        new_pixel_w = new_latent_w * 8
+        info = info_message + f"Scaled by x{final_scale:.2f}. From {current_pixel_w}x{current_pixel_h} -> {new_pixel_w}x{new_pixel_h}"
+        return (s, info)
+
+
+# --------------------------------------------------------------------
 # Node 6: LayoutExtractor_Ultimate
 # --------------------------------------------------------------------
 class LayoutExtractor_Ultimate:
@@ -369,3 +464,139 @@ class FinalAssembler_Manga:
         canvas[y1:y2+1, x1:x2+1] = pasted_region
             
         return (canvas.unsqueeze(0),)
+
+# --------------------------------------------------------------------
+# ★ Node 9: PanelUpscalerForHires (新規追加) ★
+# --------------------------------------------------------------------
+class PanelUpscalerForHires:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "base_target_width": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}),
+                "base_target_height": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}),
+                "final_upscale_factor": ("FLOAT", {"default": 1.7, "min": 1.0, "max": 8.0, "step": 0.1}),
+                "fit_mode": (["Match Area (Optimal)", "Fit Within (Safe)", "Fill Outside (Max Stretch)"],),
+                "interpolation": (["bicubic", "bilinear", "nearest-exact"],),
+            }
+        }
+    
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "scale"
+    CATEGORY = "Manga Toolbox/Upscale Utils"
+
+    def scale(self, image, base_target_width, base_target_height, final_upscale_factor, fit_mode, interpolation):
+        if image.shape[0] == 0:
+            return (image,)
+
+        # バッチの最初の画像で計算
+        first_image = image[0]
+        current_pixel_h, current_pixel_w = first_image.shape[0], first_image.shape[1]
+
+        if current_pixel_w == 0 or current_pixel_h == 0:
+            return (image,)
+
+        # Step 1: 理想的な生成サイズまでのスケール係数を計算 (LatentTargetScalerのロジック)
+        scale_to_hit_target = 1.0
+        if fit_mode == "Fit Within (Safe)":
+            scale_w = base_target_width / current_pixel_w
+            scale_h = base_target_height / current_pixel_h
+            scale_to_hit_target = min(scale_w, scale_h)
+        elif fit_mode == "Fill Outside (Max Stretch)":
+            scale_w = base_target_width / current_pixel_w
+            scale_h = base_target_height / current_pixel_h
+            scale_to_hit_target = max(scale_w, scale_h)
+        elif fit_mode == "Match Area (Optimal)":
+            target_area = base_target_width * base_target_height
+            current_area = current_pixel_w * current_pixel_h
+            if current_area > 0:
+                scale_to_hit_target = (target_area / current_area) ** 0.5
+        
+        # Step 2: 最終的なスケール係数を決定
+        total_scale = scale_to_hit_target * final_upscale_factor
+
+        final_w = int(current_pixel_w * total_scale)
+        final_h = int(current_pixel_h * total_scale)
+
+        # PyTorchの補間は (N, C, H, W) の形式を期待する
+        img_tensor_chw = image.permute(0, 3, 1, 2)
+        
+        upscaled_tensor_chw = F.interpolate(img_tensor_chw, size=(final_h, final_w), mode=interpolation)
+        
+        # 元の (N, H, W, C) 形式に戻す
+        upscaled_tensor_hwc = upscaled_tensor_chw.permute(0, 2, 3, 1)
+
+        print(f"PanelUpscaler: Scaled from {current_pixel_w}x{current_pixel_h} -> {final_w}x{final_h}")
+        return (upscaled_tensor_hwc,)
+
+# --------------------------------------------------------------------
+# ★ Node 10: ProgressiveUpscaleAssembler (新規追加) ★
+# --------------------------------------------------------------------
+class ProgressiveUpscaleAssembler:
+    temp_dir = os.path.join(folder_paths.get_output_directory(), "manga_upscale_temp")
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                    "base_image": ("IMAGE",),
+                    "upscaled_panel": ("IMAGE",),
+                    "mask_batch": ("MASK",),
+                    "panel_index": ("INT", {"default": 1, "min": 1}),
+                    "job_id": ("STRING", {"default": "upscale_job_01"}),
+                }}
+    
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "assemble_progressively"
+    CATEGORY = "Manga Toolbox/Upscale Utils"
+
+    def assemble_progressively(self, base_image, upscaled_panel, mask_batch, panel_index, job_id):
+        job_dir = os.path.join(self.temp_dir, job_id)
+        os.makedirs(job_dir, exist_ok=True)
+        progress_file_path = os.path.join(job_dir, "progress.png")
+
+        canvas_tensor = None
+
+        # 1コマ目か、途中経過ファイルが存在しない場合はbase_imageから開始
+        if panel_index == 1 or not os.path.exists(progress_file_path):
+            if panel_index == 1:
+                # 1コマ目なら、過去の同名ジョブをクリーンアップ
+                if os.path.exists(job_dir):
+                    shutil.rmtree(job_dir)
+                    os.makedirs(job_dir, exist_ok=True)
+            canvas_tensor = base_image[0].clone()
+        else:
+            # 2コマ目以降は、途中経過ファイルを読み込む
+            loaded_img = Image.open(progress_file_path).convert("RGB")
+            canvas_tensor = pil_to_tensor(loaded_img)[0].to(base_image.device)
+
+        # --- 合成処理 (FinalAssemblerと同じ) ---
+        panel_to_paste = upscaled_panel[0]
+        index = panel_index - 1
+
+        if index < 0 or index >= len(mask_batch):
+            print(f"Error: panel_index ({panel_index}) is out of bounds for mask_batch with size {len(mask_batch)}.")
+            return (canvas_tensor.unsqueeze(0),)
+
+        mask = mask_batch[index]
+        coords = torch.nonzero(mask, as_tuple=False)
+        if coords.shape[0] == 0: return (canvas_tensor.unsqueeze(0),)
+
+        y1, y2, x1, x2 = coords[:, 0].min(), coords[:, 0].max(), coords[:, 1].min(), coords[:, 1].max()
+        h, w = y2 - y1 + 1, x2 - x1 + 1
+        if h <= 0 or w <= 0: return (canvas_tensor.unsqueeze(0),)
+        
+        resized_image = F.interpolate(panel_to_paste.permute(2, 0, 1).unsqueeze(0), size=(h.item(), w.item()), mode='bilinear', align_corners=False).squeeze(0).permute(1, 2, 0)
+
+        target_region = canvas_tensor[y1:y2+1, x1:x2+1]
+        sub_mask = mask[y1:y2+1, x1:x2+1].unsqueeze(-1)
+        pasted_region = torch.where(sub_mask > 0.5, resized_image, target_region)
+        canvas_tensor[y1:y2+1, x1:x2+1] = pasted_region
+        
+        final_image_tensor = canvas_tensor.unsqueeze(0)
+
+        # --- 途中経過を保存 ---
+        tensor_to_pil(final_image_tensor).save(progress_file_path)
+        print(f"Saved upscale progress for job '{job_id}' (panel {panel_index})")
+
+        return (final_image_tensor,)
