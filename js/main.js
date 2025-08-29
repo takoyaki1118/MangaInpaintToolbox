@@ -2,13 +2,15 @@
 
 import { app } from "/scripts/app.js";
 
+// presetsフォルダのパスをハードコード（より良い方法はサーバーAPIだが、まずはこれで）
+const PRESET_DIR_PATH = "extensions/MangaInpaintToolbox/presets";
+
 console.log("### MangaInpaintToolbox JS: Script Loaded ###");
 
 app.registerExtension({
     name: "MangaInpaintToolbox.UI",
 
     async nodeCreated(node) {
-        // ★備忘録ステップ7: 処理のスコープを限定する
         if (node.comfyClass === "InteractivePanelCreator_Manga") {
             console.log(`★★★ SUCCESS: MangaInpaintToolbox JS is linked to node ${node.id} ★★★`);
 
@@ -17,17 +19,19 @@ app.registerExtension({
                 let regions = [];
                 let currentPolygonPoints = [];
                 let isDrawing = false;
-                let drawMode = "rect"; // 'rect' or 'poly'
+                let drawMode = "rect";
                 let startPos = { x: 0, y: 0 };
                 let currentRect = { x: 0, y: 0, w: 0, h: 0 };
 
-                // ★備忘録ステップ4: PythonとJSのデータ連携
+                // --- ウィジェットの取得 ---
                 const jsonWidget = node.widgets.find(w => w.name === "regions_json");
+                const presetWidget = node.widgets.find(w => w.name === "preset");
 
                 // --- UI要素の作成 ---
                 const container = document.createElement("div");
                 container.style.cssText = `display: flex; flex-direction: column; gap: 5px; padding: 5px;`;
 
+                // ★★ ここからが復元する部分 ★★
                 // モード切替
                 const modeSelector = document.createElement("div");
                 modeSelector.style.cssText = `display: flex; gap: 10px; margin-bottom: 5px;`;
@@ -60,16 +64,25 @@ app.registerExtension({
                 buttonContainer.appendChild(clearButton);
                 buttonContainer.appendChild(undoButton);
                 buttonContainer.appendChild(finishPolyButton);
-                
+                // ★★ ここまでが復元する部分 ★★
+
+                // --- UIの組み立て ---
                 container.appendChild(modeSelector);
                 container.appendChild(canvas);
                 container.appendChild(buttonContainer);
 
-                // ★備忘録ステップ5: addDOMWidgetが唯一の正解
                 const customWidget = node.addDOMWidget("interactive_canvas", "div", container);
                 customWidget.serialize = false;
 
                 // --- ヘルパー関数 ---
+
+                // UIの表示状態を更新する関数
+                const updateUIVisibility = () => {
+                    const isManual = presetWidget.value === "(Manual Canvas)";
+                    container.style.display = isManual ? "flex" : "none";
+                    node.computeSize();
+                };
+
                 const syncDataToWidget = () => {
                     const jsonString = JSON.stringify(regions);
                     if (jsonWidget.value !== jsonString) {
@@ -86,7 +99,7 @@ app.registerExtension({
                     currentPolygonPoints = [];
                     redraw();
                 };
-
+                
                 const redraw = () => {
                     const w = node.widgets.find(w => w.name === "width").value;
                     const h = node.widgets.find(w => w.name === "height").value;
@@ -123,7 +136,6 @@ app.registerExtension({
                     }
                 };
 
-                // ★備忘録ステップ6: 座標ズレ対策
                 const getScaledCoords = (e) => {
                     const rect = canvas.getBoundingClientRect();
                     if (rect.width === 0) return { x: 0, y: 0 };
@@ -134,8 +146,48 @@ app.registerExtension({
                         y: Math.round(Math.max(0, Math.min(canvas.height, (e.clientY - rect.top) * scaleY))),
                     };
                 };
-                
+
+                const loadPresetAndRedraw = async (presetFilename) => {
+                    if (presetFilename === "(Manual Canvas)" || presetFilename === "(Random)") {
+                        try {
+                           regions = JSON.parse(jsonWidget.value || "[]");
+                        } catch(e) { regions = []; }
+                        redraw();
+                        return;
+                    }
+                    
+                    try {
+                        const response = await fetch(`/${PRESET_DIR_PATH}/${presetFilename}`);
+                        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                        const presetData = await response.json();
+                        regions = presetData;
+                        jsonWidget.value = JSON.stringify(regions);
+                        redraw();
+                    } catch (error) {
+                        console.error(`Failed to load preset ${presetFilename}:`, error);
+                        regions = [];
+                        jsonWidget.value = "[]";
+                        redraw();
+                    }
+                };
+
                 // --- イベントリスナー ---
+
+                // プリセットウィジェットの変更を監視
+                const originalPresetCallback = presetWidget.callback;
+                presetWidget.callback = function(value) {
+                    updateUIVisibility();
+                    if (value !== "(Manual Canvas)") {
+                        loadPresetAndRedraw(value);
+                    } else {
+                        try {
+                           regions = JSON.parse(jsonWidget.value || "[]");
+                        } catch(e) { regions = []; }
+                        redraw();
+                    }
+                    return originalPresetCallback?.apply(this, arguments);
+                };
+
                 const handleMouseMove = e => {
                     if (!isDrawing) return;
                     const coords = getScaledCoords(e);
@@ -163,7 +215,6 @@ app.registerExtension({
                         isDrawing = true;
                         startPos = getScaledCoords(e);
                         currentRect = { x: startPos.x, y: startPos.y, w: 0, h: 0 };
-                        // ★備忘録ステップ6: windowでイベント監視
                         window.addEventListener("mousemove", handleMouseMove);
                         window.addEventListener("mouseup", handleMouseUp);
                     } else { // poly mode
@@ -175,17 +226,19 @@ app.registerExtension({
                 clearButton.onclick = () => { finishPolygon(); regions = []; syncDataToWidget(); redraw(); };
                 undoButton.onclick = () => { finishPolygon(); regions.pop(); syncDataToWidget(); redraw(); };
                 finishPolyButton.onclick = finishPolygon;
-                
+
                 const originalOnPropertyChanged = node.onPropertyChanged;
                 node.onPropertyChanged = function(name, value) {
                     originalOnPropertyChanged?.apply(this, arguments);
                     if (name === 'width' || name === 'height') redraw();
                 };
-                
-                // ★備忘録ステップ8: 状態の復元
+
+                // --- 初期化処理 ---
                 if (jsonWidget.value) {
                     try { regions = JSON.parse(jsonWidget.value); } catch(e) { regions = []; }
                 }
+                
+                updateUIVisibility();
                 redraw();
 
             } catch (error) {

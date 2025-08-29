@@ -8,44 +8,112 @@ import json
 import os
 import shutil
 import re
+import random # <--- randomをインポート
 from PIL import Image
 
 # --- グローバル定数 ---
 MAX_PANELS = 32
+PRESET_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "presets")
+
+# プリセットフォルダが存在しない場合は作成
+os.makedirs(PRESET_DIR, exist_ok=True)
 
 # --- ヘルパー関数 ---
 def tensor_to_pil(tensor, batch_index=0):
+    # (省略... 変更なし)
     return Image.fromarray(np.clip(255. * tensor[batch_index].cpu().numpy(), 0, 255).astype(np.uint8))
 
 def pil_to_tensor(image):
+    # (省略... 変更なし)
     return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
 
+def get_preset_files():
+    """presetsフォルダから.jsonファイルのリストを取得する"""
+    if not os.path.exists(PRESET_DIR):
+        return []
+    return [f for f in os.listdir(PRESET_DIR) if f.endswith('.json')]
+
 # --------------------------------------------------------------------
-# Node 1: InteractivePanelCreator (変更なし)
+# ★ Node 1: InteractivePanelCreator (機能拡張版) ★
 # --------------------------------------------------------------------
 class InteractivePanelCreator:
+    
+    # プリセットリストをクラス変数として保持
+    PRESET_FILES = ["(Manual Canvas)", "(Random)"] + get_preset_files()
+
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
+                "preset": (s.PRESET_FILES, ),
                 "width": ("INT", {"default": 768, "min": 64, "max": 8192, "step": 8}),
                 "height": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}),
                 "frame_color_hex": ("STRING", {"default": "#FFFFFF"}),
                 "background_color_hex": ("STRING", {"default": "#000000"}),
                 "regions_json": ("STRING", {"multiline": True, "default": "[]", "widget": "hidden"}),
+                "save_preset_as": ("STRING", {"default": ""}),
             }
         }
     RETURN_TYPES = ("IMAGE", "MASK", "INT")
     RETURN_NAMES = ("layout_image", "mask_batch", "panel_count")
     FUNCTION = "create_layout_and_masks"
     CATEGORY = "Manga Toolbox"
+
     def hex_to_bgr(self, h): h = h.lstrip('#'); return tuple(int(h[i:i+2], 16) for i in (4, 2, 0))
-    def create_layout_and_masks(self, width, height, frame_color_hex, background_color_hex, regions_json):
-        try: regions = json.loads(regions_json)
-        except json.JSONDecodeError: regions = []
+
+    def create_layout_and_masks(self, preset, width, height, frame_color_hex, background_color_hex, regions_json, save_preset_as):
+        
+        # --- プリセット保存処理 ---
+        if save_preset_as:
+            # ファイル名から危険な文字を除去し、.json拡張子を付ける
+            filename = re.sub(r'[\\/*?:"<>|]', "", save_preset_as)
+            if not filename.endswith('.json'):
+                filename += '.json'
+            
+            save_path = os.path.join(PRESET_DIR, filename)
+            try:
+                # 整形して保存
+                parsed_json = json.loads(regions_json)
+                with open(save_path, 'w', encoding='utf-8') as f:
+                    json.dump(parsed_json, f, indent=2, ensure_ascii=False)
+                print(f"### MangaInpaintToolbox: Saved preset to {filename} ###")
+                # 保存後はフィールドをクリアする方が親切かもしれないが、挙動としてはそのままでもOK
+            except Exception as e:
+                print(f"Error saving preset: {e}")
+
+        # --- 使用するregions_jsonを決定 ---
+        final_regions_json = regions_json
+        
+        if preset == "(Random)":
+            available_presets = get_preset_files()
+            if available_presets:
+                chosen_preset = random.choice(available_presets)
+                print(f"### MangaInpaintToolbox: Randomly selected preset: {chosen_preset} ###")
+                preset_path = os.path.join(PRESET_DIR, chosen_preset)
+                with open(preset_path, 'r', encoding='utf-8') as f:
+                    final_regions_json = f.read()
+            else:
+                print("### MangaInpaintToolbox: No presets found for random selection. Using manual canvas. ###")
+
+        elif preset != "(Manual Canvas)":
+            preset_path = os.path.join(PRESET_DIR, preset)
+            if os.path.exists(preset_path):
+                print(f"### MangaInpaintToolbox: Loading preset: {preset} ###")
+                with open(preset_path, 'r', encoding='utf-8') as f:
+                    final_regions_json = f.read()
+            else:
+                 print(f"Warning: Preset file not found: {preset}. Falling back to manual canvas.")
+
+        # --- 描画処理 (ここからは元のロジックとほぼ同じ) ---
+        try:
+            regions = json.loads(final_regions_json)
+        except json.JSONDecodeError:
+            regions = []
+
         bg_color, frame_color = self.hex_to_bgr(background_color_hex), self.hex_to_bgr(frame_color_hex)
         canvas_cv = np.full((height, width, 3), bg_color, dtype=np.uint8)
         mask_list = []
+        
         if regions:
             for region in regions:
                 single_mask_np = np.zeros((height, width), dtype=np.uint8)
@@ -60,8 +128,12 @@ class InteractivePanelCreator:
                     cv2.fillPoly(canvas_cv, [pts], frame_color)
                     cv2.fillPoly(single_mask_np, [pts], 255)
                 mask_list.append(torch.from_numpy(single_mask_np.astype(np.float32) / 255.0))
+
         image_tensor = torch.from_numpy(cv2.cvtColor(canvas_cv, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0).unsqueeze(0)
-        if not mask_list: return (image_tensor, torch.zeros((1, height, width), dtype=torch.float32), 0)
+        
+        if not mask_list:
+            return (image_tensor, torch.zeros((1, height, width), dtype=torch.float32), 0)
+            
         return (image_tensor, torch.stack(mask_list), len(mask_list))
 
 # --------------------------------------------------------------------
