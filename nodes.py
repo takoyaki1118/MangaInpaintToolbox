@@ -14,6 +14,8 @@ from PIL.PngImagePlugin import PngInfo
 import folder_paths
 from comfy.cli_args import args
 from threading import Lock
+import server # ★★ APIサーバーのインスタンスをインポート
+from aiohttp import web # ★★ webレスポンス作成用
 
 # --- グローバル定数 ---
 MAX_PANELS = 32
@@ -34,6 +36,19 @@ def get_preset_files():
     if not os.path.exists(PRESET_DIR):
         return []
     return [f for f in os.listdir(PRESET_DIR) if f.endswith('.json')]
+
+# ★★★ APIエンドポイントの定義 (新規追加) ★★★
+@server.PromptServer.instance.routes.get("/manga-toolbox/get-output-files")
+async def get_output_files(request):
+    output_dir = folder_paths.get_output_directory()
+    image_paths = []
+    for root, _, files in os.walk(output_dir):
+        for file in files:
+            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+                relative_path = os.path.relpath(os.path.join(root, file), output_dir)
+                image_paths.append(relative_path)
+    image_paths.sort(reverse=True)
+    return web.json_response(image_paths)
 
 # --------------------------------------------------------------------
 # Node 1: InteractivePanelCreator
