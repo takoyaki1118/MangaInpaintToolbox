@@ -6,7 +6,8 @@ from .nodes import (
     LatentTargetScaler_Pro, AssembleAndProgress,
     LayoutExtractor_Ultimate, LoadMangaFromOutput,
     FinalAssembler_Manga, PanelUpscalerForHires,
-    ProgressiveUpscaleAssembler, # <--- 新ノードをインポート
+    ProgressiveUpscaleAssembler,
+    PanelArrangerForI2I,
 )
 
 WEB_DIRECTORY = "./js"
@@ -23,12 +24,14 @@ NODE_CLASS_MAPPINGS = {
     "LoadMangaFromOutput_Manga": LoadMangaFromOutput,
     "PanelUpscalerForHires_Manga": PanelUpscalerForHires,
     "FinalAssembler_Manga": FinalAssembler_Manga,
-    "ProgressiveUpscaleAssembler_Manga": ProgressiveUpscaleAssembler, # <--- 新ノードを追加
+    "ProgressiveUpscaleAssembler_Manga": ProgressiveUpscaleAssembler,
+    "PanelArrangerForI2I_Manga": PanelArrangerForI2I,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     # --- Generation Workflow ---
-    "InteractivePanelCreator_Manga": "① Create Panel Layout",
+    "PanelArrangerForI2I_Manga": "① Arrange Panels for I2I",
+    "InteractivePanelCreator_Manga": "① Create Panel Layout (Legacy)", # 既存ノードをLegacyに
     "MangaPanelDetector_Ultimate": "① Detect Panels by Color",
     "CropPanelForInpaint_Advanced": "② Crop Panel (Shape Aware)",
     "LatentTargetScaler_Pro_Manga": "③ Latent Target Scaler (Pro)",

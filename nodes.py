@@ -9,13 +9,15 @@ import os
 import shutil
 import re
 import random
-from PIL import Image
+import time
+from PIL import Image, ImageDraw
 from PIL.PngImagePlugin import PngInfo
 import folder_paths
 from comfy.cli_args import args
 from threading import Lock
-import server # ★★ APIサーバーのインスタンスをインポート
-from aiohttp import web # ★★ webレスポンス作成用
+import server
+from aiohttp import web
+import comfy.utils
 
 # --- グローバル定数 ---
 MAX_PANELS = 32
@@ -33,11 +35,10 @@ def pil_to_tensor(image):
     return torch.from_numpy(np.array(image).astype(np.float32) / 255.0).unsqueeze(0)
 
 def get_preset_files():
-    if not os.path.exists(PRESET_DIR):
-        return []
+    if not os.path.exists(PRESET_DIR): return []
     return [f for f in os.listdir(PRESET_DIR) if f.endswith('.json')]
 
-# ★★★ APIエンドポイントの定義 (新規追加) ★★★
+# --- APIエンドポイント定義 ---
 @server.PromptServer.instance.routes.get("/manga-toolbox/get-output-files")
 async def get_output_files(request):
     output_dir = folder_paths.get_output_directory()
@@ -49,6 +50,27 @@ async def get_output_files(request):
                 image_paths.append(relative_path)
     image_paths.sort(reverse=True)
     return web.json_response(image_paths)
+
+@server.PromptServer.instance.routes.post("/manga-toolbox/upload-image")
+async def upload_image(request):
+    try:
+        post = await request.post()
+        image_file = post.get("image")
+        if not (image_file and image_file.filename):
+            return web.json_response({"error": "No image file found in the request"}, status=400)
+            
+        filename = os.path.basename(image_file.filename)
+        unique_filename = f"manga_panel_{int(time.time())}_{filename}"
+        filepath = os.path.join(folder_paths.get_input_directory(), unique_filename)
+        
+        with open(filepath, 'wb') as f:
+            f.write(image_file.file.read())
+
+        return web.json_response({"filename": unique_filename, "type": "input", "subfolder": ""})
+        
+    except Exception as e:
+        print(f"### MangaInpaintToolbox: Image Upload Error: {e}")
+        return web.json_response({"error": str(e)}, status=500)
 
 # --------------------------------------------------------------------
 # Node 1: InteractivePanelCreator
@@ -615,3 +637,125 @@ class ProgressiveUpscaleAssembler:
         print(f"Saved upscale progress for job '{job_id}' (panel {panel_index})")
 
         return (final_image_tensor,)
+
+
+# --------------------------------------------------------------------
+# ★★★ 新規追加ノード: PanelArrangerForI2I ★★★
+# --------------------------------------------------------------------
+class PanelArrangerForI2I:
+    PRESET_FILES = ["(Manual Canvas)"] + get_preset_files()
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "preset": (s.PRESET_FILES, ),
+                "width": ("INT", {"default": 768, "min": 64, "max": 8192, "step": 8}),
+                "height": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}),
+                "frame_color_hex": ("STRING", {"default": "#FFFFFF"}),
+                "background_color_hex": ("STRING", {"default": "#000000"}),
+                "arrangement_json": ("STRING", {"multiline": True, "default": '{"regions":[], "images":[]}', "widget": "hidden"}),
+                "save_preset_as": ("STRING", {"default": ""}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "INT", "STRING")
+    RETURN_NAMES = ("layout_image", "mask_batch", "init_image_for_i2i", "panel_count", "arrangement_json")
+    FUNCTION = "create_arrangement"
+    CATEGORY = "Manga Toolbox"
+
+    def hex_to_rgb_pil(self, h):
+        h = h.lstrip('#')
+        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+    def create_arrangement(self, preset, width, height, frame_color_hex, background_color_hex, arrangement_json, save_preset_as):
+        # プリセット保存ロジック（変更なし）
+        if save_preset_as:
+            filename = re.sub(r'[\\/*?:"<>|]', "", save_preset_as)
+            if not filename.endswith('.json'): filename += '.json'
+            save_path = os.path.join(PRESET_DIR, filename)
+            try:
+                parsed_data = json.loads(arrangement_json)
+                regions_only = parsed_data.get("regions", [])
+                with open(save_path, 'w', encoding='utf-8') as f: json.dump(regions_only, f, indent=2, ensure_ascii=False)
+                print(f"### MangaInpaintToolbox: Saved panel layout preset to {filename} ###")
+            except Exception as e: print(f"Error saving preset: {e}")
+
+        final_arrangement_json = arrangement_json
+        # プリセット読み込みロジック（変更なし）
+        if preset != "(Manual Canvas)":
+            preset_path = os.path.join(PRESET_DIR, preset)
+            if os.path.exists(preset_path):
+                print(f"### MangaInpaintToolbox: Loading preset: {preset} ###")
+                with open(preset_path, 'r', encoding='utf-8') as f:
+                    regions_from_preset = json.load(f)
+                    try: current_data = json.loads(arrangement_json)
+                    except json.JSONDecodeError: current_data = {"images": []}
+                    current_data["regions"] = regions_from_preset
+                    final_arrangement_json = json.dumps(current_data)
+        
+        try:
+            data = json.loads(final_arrangement_json)
+            regions = data.get("regions", [])
+            images_info = data.get("images", [])
+        except json.JSONDecodeError:
+            regions, images_info = [], []
+
+        bg_color = self.hex_to_rgb_pil(background_color_hex)
+        frame_color = self.hex_to_rgb_pil(frame_color_hex)
+
+        # 1. コマ割りレイアウト画像とマスクバッチの生成 (変更なし)
+        layout_pil = Image.new('RGB', (width, height), bg_color)
+        draw_layout = ImageDraw.Draw(layout_pil)
+        mask_list = []
+        for region in regions:
+            single_mask_pil = Image.new('L', (width, height), 0)
+            draw_mask = ImageDraw.Draw(single_mask_pil)
+            region_type = region.get("type", "rect")
+            if region_type == "rect":
+                x, y, w, h = [int(region.get(k, 0)) for k in ['x', 'y', 'w', 'h']]
+                if w > 0 and h > 0:
+                    draw_layout.rectangle([x, y, x + w, y + h], fill=frame_color)
+                    draw_mask.rectangle([x, y, x + w, y + h], fill=255)
+            elif region_type == "poly":
+                pts = [(p['x'], p['y']) for p in region.get("points", [])]
+                if len(pts) >= 3:
+                    draw_layout.polygon(pts, fill=frame_color)
+                    draw_mask.polygon(pts, fill=255)
+            mask_list.append(torch.from_numpy(np.array(single_mask_pil, dtype=np.float32) / 255.0))
+
+        layout_image_tensor = pil_to_tensor(layout_pil)
+        if not mask_list:
+            empty_mask = torch.zeros((1, height, width), dtype=torch.float32)
+            return (layout_image_tensor, empty_mask, layout_image_tensor, 0, final_arrangement_json)
+        mask_batch_tensor = torch.stack(mask_list)
+
+        # ★★★ ここからが修正箇所です ★★★
+        # 2. I2I用初期画像の生成ロジックを修正
+        #    黒いキャンバスから始めるのではなく、完成したレイアウト画像をコピーして、その上に画像を貼り付けます。
+        init_image_pil = layout_pil.copy()
+
+        for img_info in images_info:
+            try:
+                image_path = folder_paths.get_annotated_filepath(img_info['src'])
+                if not os.path.exists(image_path):
+                    print(f"Warning: Image file not found: {img_info['src']}")
+                    continue
+                
+                # Pillowの画像は透過情報(A)を持つことがあるので、それを活かして貼り付ける
+                with Image.open(image_path).convert("RGBA") as img_to_place:
+                    w, h = int(img_info['w']), int(img_info['h'])
+                    if w > 0 and h > 0:
+                        img_to_place = img_to_place.resize((w, h), Image.Resampling.LANCZOS)
+                    
+                    x, y = int(img_info['x']), int(img_info['y'])
+                    # RGBA画像の場合、第3引数に自身をマスクとして渡すことで透過部分が正しく処理される
+                    init_image_pil.paste(img_to_place, (x, y), img_to_place)
+            except Exception as e:
+                print(f"Error processing image {img_info.get('src', '')}: {e}")
+
+        # 3. テンソルに変換（以前の複雑な合成処理は不要になります）
+        init_image_tensor = pil_to_tensor(init_image_pil.convert("RGB"))
+        # ★★★ 修正箇所はここまで ★★★
+
+        return (layout_image_tensor, mask_batch_tensor, init_image_tensor, len(mask_list), final_arrangement_json)
