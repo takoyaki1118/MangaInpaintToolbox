@@ -194,32 +194,46 @@ class AssembleAndProgress:
             full_output_folder, filename, counter, subfolder, filename_prefix_out = folder_paths.get_save_image_path(filename_prefix, self.output_dir, final_image_tensor[0].shape[1], final_image_tensor[0].shape[0])
             results = list()
             metadata = PngInfo()
-            if prompt is not None:
-                metadata.add_text("prompt", json.dumps(prompt))
+            if prompt is not None: metadata.add_text("prompt", json.dumps(prompt))
             if extra_pnginfo is not None:
-                for key, value in extra_pnginfo.items():
-                    metadata.add_text(key, json.dumps(value))
-            for image in final_image_tensor:
-                img = tensor_to_pil(image.unsqueeze(0))
-                compress_level = 4
-                if hasattr(args, 'output_quality') and args.output_quality < 100:
-                    compress_level = 4 if args.output_quality > 50 else 0
-                image_file = f"{filename}_{counter:05}_.png"
-                img.save(os.path.join(full_output_folder, image_file), pnginfo=metadata, compress_level=compress_level)
-                results.append({"filename": image_file, "subfolder": subfolder, "type": "output"})
-                counter += 1
+                for key, value in extra_pnginfo.items(): metadata.add_text(key, json.dumps(value))
+            
+            img = tensor_to_pil(final_image_tensor)
+            image_file = f"{filename}_{counter:05}_.png"
+            img.save(os.path.join(full_output_folder, image_file), pnginfo=metadata)
+            results.append({"filename": image_file, "subfolder": subfolder, "type": "output"})
+            
             filename = results[0]['filename']
             print(f"### MangaInpaintToolbox: Final image saved as {filename} ###")
+            
+            # ★★★ ここからが修正箇所です ★★★
             try:
-                layout_data = json.loads(regions_json)
+                layout_data_to_save = []
+                # まずJSONとしてパースしてみる
+                parsed_json = json.loads(regions_json)
+                
+                # 新しい形式 (辞書) かどうかをチェック
+                if isinstance(parsed_json, dict) and 'regions' in parsed_json:
+                    # 'regions' キーがあれば、その値（配列）を使用
+                    layout_data_to_save = parsed_json['regions']
+                    print("### MangaInpaintToolbox: Detected new arrangement_json format. Saving regions only. ###")
+                else:
+                    # それ以外（古い形式の配列など）は、そのまま使用
+                    layout_data_to_save = parsed_json
+
                 with index_lock:
                     if os.path.exists(INDEX_FILE):
                         with open(INDEX_FILE, 'r', encoding='utf-8') as f: index_data = json.load(f)
                     else: index_data = {}
-                    index_data[filename] = layout_data
+                    
+                    index_data[filename] = layout_data_to_save
+                    
                     with open(INDEX_FILE, 'w', encoding='utf-8') as f: json.dump(index_data, f, indent=2, ensure_ascii=False)
                     print(f"### MangaInpaintToolbox: Layout data for {filename} saved to index. ###")
-            except Exception as e: print(f"Error: Could not save layout data to index file. {e}")
+            except Exception as e:
+                print(f"Error: Could not save layout data to index file. {e}")
+            # ★★★ 修正箇所はここまで ★★★
+
         return (final_image_tensor,)
 
 # --------------------------------------------------------------------
