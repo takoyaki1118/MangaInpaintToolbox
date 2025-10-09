@@ -219,11 +219,9 @@ app.registerExtension({
                         else if (region.type === 'poly') { ctx.beginPath(); region.points.forEach((p, j) => j === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)); ctx.closePath(); ctx.stroke(); }
                     });
                     placedImages.forEach((pImg, i) => {
-                        // draw image using its originalImg & cropRect
                         try {
                             ctx.drawImage(pImg.originalImg, pImg.cropRect.x, pImg.cropRect.y, pImg.cropRect.w, pImg.cropRect.h, pImg.x, pImg.y, pImg.w, pImg.h);
                         } catch(e) {
-                            // fallback: draw full image if some values missing
                             try { ctx.drawImage(pImg.originalImg, pImg.x, pImg.y, pImg.w, pImg.h); } catch(err) {}
                         }
                         if (i === selectedImageIndex && !isCropping) {
@@ -257,7 +255,6 @@ app.registerExtension({
                     if (rect.width === 0) return { x: 0, y: 0 };
                     const scaleX = e.target.width / rect.width;
                     const scaleY = e.target.height / rect.height;
-                    // ★★★ ここが修正された箇所です ★★★
                     return { x: Math.round(Math.max(0, (e.clientX - rect.left) * scaleX)), y: Math.round(Math.max(0, (e.clientY - rect.top) * scaleY)) };
                 };
                 const handleMouseDown = e => {
@@ -401,70 +398,47 @@ app.registerExtension({
                     redraw();
                 };
                 cropCancelButton.onclick = exitCropMode;
-
-                // --- 修正済み: クロップ確定処理（クロップ画像を生成してサーバーにアップロードし、fileInfo と表示画像を差し替える）
+                
                 cropConfirmButton.onclick = async () => {
                     if (cropImageIndex === -1) return;
                     const pImg = placedImages[cropImageIndex];
-
                     try {
-                        // 比率（表示->元画像の比率）
                         const sourceToDisplayRatioX = pImg.cropRect.w / pImg.w;
                         const sourceToDisplayRatioY = pImg.cropRect.h / pImg.h;
-
-                        // 表示上の tempCropBox を元画像座標へ変換（切り出すソース領域）
                         const newCropX = pImg.cropRect.x + (pImg.tempCropBox.x - pImg.x) * sourceToDisplayRatioX;
                         const newCropY = pImg.cropRect.y + (pImg.tempCropBox.y - pImg.y) * sourceToDisplayRatioY;
                         const newCropW = pImg.tempCropBox.w * sourceToDisplayRatioX;
                         const newCropH = pImg.tempCropBox.h * sourceToDisplayRatioY;
-
-                        // 安全化
                         const sx = Math.max(0, Math.round(newCropX));
                         const sy = Math.max(0, Math.round(newCropY));
                         const sw = Math.max(1, Math.round(newCropW));
                         const sh = Math.max(1, Math.round(newCropH));
-
-                        // オフスクリーンキャンバスに切り抜きを描画
                         const off = document.createElement("canvas");
-                        off.width = sw;
-                        off.height = sh;
+                        off.width = sw; off.height = sh;
                         const offCtx = off.getContext("2d");
                         offCtx.drawImage(pImg.originalImg, sx, sy, sw, sh, 0, 0, sw, sh);
-
-                        // Blob に変換してサーバーにアップロード（既存の upload-image エンドポイントを利用）
                         const blob = await new Promise(resolve => off.toBlob(resolve, "image/png"));
                         const formData = new FormData();
-                        // 新しいファイル名を付ける場合はここで指定できます。サーバー側で上書きや別名保存される想定。
                         const suggestedName = `cropped_${pImg.fileInfo.filename.replace(/[^a-zA-Z0-9.\-_]/g, "_")}`;
                         formData.append("image", blob, suggestedName);
-
                         cropConfirmButton.textContent = "Processing...";
                         cropConfirmButton.disabled = true;
-
                         const uploadResp = await api.fetchApi("/manga-toolbox/upload-image", { method: "POST", body: formData });
                         if (!uploadResp.ok) throw new Error(`Upload failed: ${uploadResp.statusText}`);
                         const newFileInfo = await uploadResp.json();
-
-                        // immediate preview 用に dataURL を使って表示画像を差し替える（サーバー経由の表示は newFileInfo.filename を参照）
                         const newImg = new Image();
                         newImg.onload = () => {
-                            // 新しい元画像（完全にクロップ済み）の参照に置き換え
                             pImg.originalImg = newImg;
-                            // クロップ済み画像は「元画像の全体」が現在の cropRect になる
                             pImg.cropRect = { x: 0, y: 0, w: sw, h: sh };
-                            // 表示位置・サイズは tempCropBox に合わせる
                             pImg.x = pImg.tempCropBox.x;
                             pImg.y = pImg.tempCropBox.y;
                             pImg.w = pImg.tempCropBox.w;
                             pImg.h = pImg.tempCropBox.h;
-                            // サーバー上のファイル情報を差し替え（以降の出力や保存で新しいファイル名が使われる）
                             pImg.fileInfo = newFileInfo;
-                            // クリーンアップ
                             delete pImg.tempCropBox;
                             syncDataToWidget();
                             exitCropMode();
                         };
-                        // すぐに dataURL をセットして表示を更新
                         newImg.src = off.toDataURL("image/png");
                     } catch (err) {
                         console.error("Crop/Upload error:", err);

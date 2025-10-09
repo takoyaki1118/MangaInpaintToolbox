@@ -1,5 +1,3 @@
-# /ComfyUI/custom_nodes/MangaInpaintToolbox/nodes.py
-
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -73,7 +71,7 @@ async def upload_image(request):
         return web.json_response({"error": str(e)}, status=500)
 
 # --------------------------------------------------------------------
-# Node 1: InteractivePanelCreator
+# Node 1: InteractivePanelCreator (Legacy)
 # --------------------------------------------------------------------
 class InteractivePanelCreator:
     PRESET_FILES = ["(Manual Canvas)"] + get_preset_files()
@@ -128,18 +126,33 @@ class InteractivePanelCreator:
         return (image_tensor, torch.stack(mask_list), len(mask_list), final_regions_json)
 
 # --------------------------------------------------------------------
-# Node 2: AssembleAndProgress
+# Node 2: AssembleAndProgress (プロンプト保存機能追加)
 # --------------------------------------------------------------------
 class AssembleAndProgress:
     output_dir = folder_paths.get_output_directory()
     temp_dir = os.path.join(output_dir, "manga_inpaint_temp")
     @classmethod
     def INPUT_TYPES(s):
-        return { "required": { "mode": (["Chronological (制作モード)", "Overlay (修正モード)"],), "base_image": ("IMAGE",), "generated_panel": ("IMAGE",), "mask_batch": ("MASK",), "panel_index": ("INT", {"default": 1, "min": 1}), "panel_count": ("INT", {"default": 1, "min": 1}), "regions_json": ("STRING", {"multiline": True, "widget": "hidden"}), "load_from_index_chrono": ("INT", {"default": 0, "min": 0, "label": "Load From (制作モード用)"}), "filename_prefix": ("STRING", {"default": "Manga"}), "job_id": ("STRING", {"default": "default_job"}), }, "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"}, }
+        return { 
+            "required": { 
+                "mode": (["Chronological (制作モード)", "Overlay (修正モード)"],), 
+                "base_image": ("IMAGE",), 
+                "generated_panel": ("IMAGE",), 
+                "mask_batch": ("MASK",), 
+                "panel_index": ("INT", {"default": 1, "min": 1}), 
+                "panel_count": ("INT", {"default": 1, "min": 1}), 
+                "regions_json": ("STRING", {"multiline": True, "widget": "hidden"}), 
+                "prompt_for_index": ("STRING", {"multiline": True, "default": ""}),
+                "load_from_index_chrono": ("INT", {"default": 0, "min": 0, "label": "Load From (制作モード用)"}), 
+                "filename_prefix": ("STRING", {"default": "Manga"}), 
+                "job_id": ("STRING", {"default": "default_job"}), 
+            }, 
+            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"}, 
+        }
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "assemble"
     CATEGORY = "Manga Toolbox"
-    def assemble(self, mode, base_image, generated_panel, mask_batch, panel_index, panel_count, regions_json, load_from_index_chrono, filename_prefix, job_id, prompt=None, extra_pnginfo=None):
+    def assemble(self, mode, base_image, generated_panel, mask_batch, panel_index, panel_count, regions_json, prompt_for_index, load_from_index_chrono, filename_prefix, job_id, prompt=None, extra_pnginfo=None):
         job_dir = os.path.join(self.temp_dir, job_id)
         history_dir = os.path.join(job_dir, "history")
         latest_dir = os.path.join(job_dir, "latest")
@@ -206,19 +219,13 @@ class AssembleAndProgress:
             filename = results[0]['filename']
             print(f"### MangaInpaintToolbox: Final image saved as {filename} ###")
             
-            # ★★★ ここからが修正箇所です ★★★
             try:
                 layout_data_to_save = []
-                # まずJSONとしてパースしてみる
                 parsed_json = json.loads(regions_json)
                 
-                # 新しい形式 (辞書) かどうかをチェック
                 if isinstance(parsed_json, dict) and 'regions' in parsed_json:
-                    # 'regions' キーがあれば、その値（配列）を使用
                     layout_data_to_save = parsed_json['regions']
-                    print("### MangaInpaintToolbox: Detected new arrangement_json format. Saving regions only. ###")
                 else:
-                    # それ以外（古い形式の配列など）は、そのまま使用
                     layout_data_to_save = parsed_json
 
                 with index_lock:
@@ -226,13 +233,15 @@ class AssembleAndProgress:
                         with open(INDEX_FILE, 'r', encoding='utf-8') as f: index_data = json.load(f)
                     else: index_data = {}
                     
-                    index_data[filename] = layout_data_to_save
+                    index_data[filename] = {
+                        "layout": layout_data_to_save,
+                        "prompt": prompt_for_index
+                    }
                     
                     with open(INDEX_FILE, 'w', encoding='utf-8') as f: json.dump(index_data, f, indent=2, ensure_ascii=False)
-                    print(f"### MangaInpaintToolbox: Layout data for {filename} saved to index. ###")
+                    print(f"### MangaInpaintToolbox: Layout and prompt data for {filename} saved to index. ###")
             except Exception as e:
-                print(f"Error: Could not save layout data to index file. {e}")
-            # ★★★ 修正箇所はここまで ★★★
+                print(f"Error: Could not save layout and prompt data to index file. {e}")
 
         return (final_image_tensor,)
 
@@ -284,492 +293,262 @@ class ConditionalLatentScaler_Final:
         new_h, new_w = int(latent.shape[2] * scale_factor), int(latent.shape[3] * scale_factor); s["samples"] = F.interpolate(latent, size=(new_h, new_w), mode=upscale_method); return (s, f"Scaled by x{scale_factor:.2f}. From {current_pixel_w}x{current_pixel_h} -> {new_w*8}x{new_h*8}")
 
 # --------------------------------------------------------------------
-# ★ Node 5.5: LatentTargetScaler_Pro (Match Area モード追加 - 最終版) ★
+# Node 5.5: LatentTargetScaler_Pro
 # --------------------------------------------------------------------
 class LatentTargetScaler_Pro:
     @classmethod
     def INPUT_TYPES(s):
-        return {
-            "required": {
-                "samples": ("LATENT",),
-                "target_width": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}),
-                "target_height": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}),
-                "upper_bound_allowance": ("FLOAT", {"default": 1.3, "min": 1.0, "max": 3.0, "step": 0.05}),
-                # ★★ 3つのモードに進化 ★★
-                "fit_mode": (["Fit Within (Safe)", "Fill Outside (Max Stretch)", "Match Area (Optimal)"],),
-                "upscale_if_smaller": ("BOOLEAN", {"default": True}),
-                "downscale_if_larger": ("BOOLEAN", {"default": True}),
-            }
-        }
-    
-    RETURN_TYPES = ("LATENT", "STRING")
+        return { "required": { "samples": ("LATENT",), "target_width": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}), "target_height": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}), "upper_bound_allowance": ("FLOAT", {"default": 1.3, "min": 1.0, "max": 3.0, "step": 0.05}), "fit_mode": (["Fit Within (Safe)", "Fill Outside (Max Stretch)", "Match Area (Optimal)"],), "upscale_if_smaller": ("BOOLEAN", {"default": True}), "downscale_if_larger": ("BOOLEAN", {"default": True}), } }
+    RETURN_TYPES, FUNCTION, CATEGORY = ("LATENT", "STRING"), "scale_to_target", "Manga Toolbox"
     RETURN_NAMES = ("scaled_samples", "info")
-    FUNCTION = "scale_to_target"
-    CATEGORY = "Manga Toolbox"
-
     def scale_to_target(self, samples, target_width, target_height, upper_bound_allowance, fit_mode, upscale_if_smaller, downscale_if_larger):
-        s = samples.copy()
-        latent = samples["samples"]
-        
-        if latent.shape[0] == 0:
-            return (s, "Empty latent input.")
-
-        current_pixel_h = latent.shape[2] * 8
-        current_pixel_w = latent.shape[3] * 8
-        
-        if current_pixel_w == 0 or current_pixel_h == 0:
-            return (s, "Error: Current size is zero.")
-
-        # ★★ モードに応じたスケール計算ロジック ★★
+        s, latent = samples.copy(), samples["samples"];
+        if latent.shape[0] == 0: return (s, "Empty latent input.")
+        current_pixel_h, current_pixel_w = latent.shape[2] * 8, latent.shape[3] * 8;
+        if current_pixel_w == 0 or current_pixel_h == 0: return (s, "Error: Current size is zero.")
         scale_to_hit_target = 1.0
-        if fit_mode == "Fit Within (Safe)":
-            scale_w = target_width / current_pixel_w
-            scale_h = target_height / current_pixel_h
-            scale_to_hit_target = min(scale_w, scale_h)
-        elif fit_mode == "Fill Outside (Max Stretch)":
-            scale_w = target_width / current_pixel_w
-            scale_h = target_height / current_pixel_h
-            scale_to_hit_target = max(scale_w, scale_h)
-        elif fit_mode == "Match Area (Optimal)":
-            target_area = target_width * target_height
-            current_area = current_pixel_w * current_pixel_h
-            if current_area > 0:
-                scale_to_hit_target = (target_area / current_area) ** 0.5
-
-        final_scale = 1.0
-        info_message = ""
-
+        if fit_mode == "Fit Within (Safe)": scale_to_hit_target = min(target_width / current_pixel_w, target_height / current_pixel_h)
+        elif fit_mode == "Fill Outside (Max Stretch)": scale_to_hit_target = max(target_width / current_pixel_w, target_height / current_pixel_h)
+        elif fit_mode == "Match Area (Optimal)": target_area, current_area = target_width * target_height, current_pixel_w * current_pixel_h; scale_to_hit_target = (target_area / current_area) ** 0.5 if current_area > 0 else 1.0
+        final_scale, info_message = 1.0, ""
         if scale_to_hit_target > 1.0:
-            if upscale_if_smaller:
-                final_scale = scale_to_hit_target
-                info_message = f"Upscaling to {fit_mode}. "
+            if upscale_if_smaller: final_scale, info_message = scale_to_hit_target, f"Upscaling to {fit_mode}. "
             else: info_message = f"Not scaled (upscaling disabled). "
         elif scale_to_hit_target < 1.0:
-            is_too_large = (current_pixel_w > target_width * upper_bound_allowance) or \
-                           (current_pixel_h > target_height * upper_bound_allowance)
-            if is_too_large:
-                if downscale_if_larger:
-                    final_scale = scale_to_hit_target
-                    info_message = f"Downscaling (exceeds {upper_bound_allowance}x allowance). "
-                else: info_message = f"Not scaled (downscaling disabled). "
-            else: info_message = f"Not downscaled (within {upper_bound_allowance}x allowance). "
-
-        if abs(final_scale - 1.0) < 0.01: # ほぼスケールしない場合は処理をスキップ
-            final_scale = 1.0
-            info_message = "Not scaled (already optimal size). "
-
-        if final_scale == 1.0:
-            info = info_message + f"Current: {current_pixel_w}x{current_pixel_h}"
-            return (s, info)
-
-        new_latent_h = int(latent.shape[2] * final_scale)
-        new_latent_w = int(latent.shape[3] * final_scale)
-        new_latent_h = (new_latent_h // 8) * 8
-        new_latent_w = (new_latent_w // 8) * 8
-
-        if new_latent_h == 0 or new_latent_w == 0:
-             return (s, f"Error: Calculated new size is zero. From {current_pixel_w}x{current_pixel_h}")
-
+            is_too_large = (current_pixel_w > target_width * upper_bound_allowance) or (current_pixel_h > target_height * upper_bound_allowance)
+            if is_too_large and downscale_if_larger: final_scale, info_message = scale_to_hit_target, f"Downscaling (exceeds {upper_bound_allowance}x allowance). "
+            else: info_message = f"Not scaled ({'downscaling disabled' if is_too_large else f'within {upper_bound_allowance}x allowance'}). "
+        if abs(final_scale - 1.0) < 0.01: final_scale, info_message = 1.0, "Not scaled (already optimal size). "
+        if final_scale == 1.0: return (s, info_message + f"Current: {current_pixel_w}x{current_pixel_h}")
+        new_latent_h, new_latent_w = int(latent.shape[2] * final_scale), int(latent.shape[3] * final_scale);
+        if new_latent_h == 0 or new_latent_w == 0: return (s, f"Error: Calculated new size is zero. From {current_pixel_w}x{current_pixel_h}")
         s["samples"] = F.interpolate(latent, size=(new_latent_h, new_latent_w), mode='bicubic', align_corners=False)
-        
-        new_pixel_h = new_latent_h * 8
-        new_pixel_w = new_latent_w * 8
-        info = info_message + f"Scaled by x{final_scale:.2f}. From {current_pixel_w}x{current_pixel_h} -> {new_pixel_w}x{new_pixel_h}"
-        return (s, info)
-
+        new_pixel_h, new_pixel_w = new_latent_h * 8, new_latent_w * 8
+        return (s, info_message + f"Scaled by x{final_scale:.2f}. From {current_pixel_w}x{current_pixel_h} -> {new_pixel_w}x{new_pixel_h}")
 
 # --------------------------------------------------------------------
 # Node 6: LayoutExtractor_Ultimate
 # --------------------------------------------------------------------
 class LayoutExtractor_Ultimate:
     @classmethod
-    def INPUT_TYPES(cls):
-        return {"required": { "image": ("IMAGE",), "image_path": ("STRING", {"default": "ComfyUI_00001_.png"}), "frame_color_hex": ("STRING", {"default": "#FFFFFF"}), "color_tolerance": ("INT", {"default": 10}), "gap_closing_scale": ("INT", {"default": 5}), "final_line_thickness": ("INT", {"default": 5}), "sort_panels_by": (["top-to-bottom", "left-to-right", "largest-first"],), "min_area": ("INT", {"default": 5000}), }}
-    RETURN_TYPES = ("MASK", "INT", "IMAGE")
+    def INPUT_TYPES(cls): return {"required": { "image": ("IMAGE",), "image_path": ("STRING", {"default": "ComfyUI_00001_.png"}), "frame_color_hex": ("STRING", {"default": "#FFFFFF"}), "color_tolerance": ("INT", {"default": 10}), "gap_closing_scale": ("INT", {"default": 5}), "final_line_thickness": ("INT", {"default": 5}), "sort_panels_by": (["top-to-bottom", "left-to-right", "largest-first"],), "min_area": ("INT", {"default": 5000}), }}
+    RETURN_TYPES, FUNCTION, CATEGORY = ("MASK", "INT", "IMAGE"), "extract_layout", "Manga Toolbox"
     RETURN_NAMES = ("mask_batch", "panel_count", "original_image")
-    FUNCTION = "extract_layout"
-    CATEGORY = "Manga Toolbox"
     def hex_to_rgb(self, h): h = h.lstrip('#'); return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
     def extract_layout(self, image, image_path, frame_color_hex, color_tolerance, gap_closing_scale, final_line_thickness, sort_panels_by, min_area):
-        filename = os.path.basename(image_path)
-        img_h, img_w = image.shape[1], image.shape[2]
-        layout_from_index = None
+        filename = os.path.basename(image_path); img_h, img_w = image.shape[1], image.shape[2]; layout_from_index = None
         if os.path.exists(INDEX_FILE):
             with index_lock:
                 with open(INDEX_FILE, 'r', encoding='utf-8') as f: index_data = json.load(f)
             if filename in index_data:
-                layout_from_index = index_data[filename]
+                entry = index_data[filename]
+                if isinstance(entry, dict) and "layout" in entry:
+                    layout_from_index = entry["layout"]
+                elif isinstance(entry, list):
+                    layout_from_index = entry
                 print(f"### LayoutExtractor: Found layout for '{filename}' in index. Using exact data. ###")
         if layout_from_index:
             mask_list = []
             for region in layout_from_index:
-                single_mask_np = np.zeros((img_h, img_w), dtype=np.uint8)
-                region_type = region.get("type", "rect")
+                single_mask_np = np.zeros((img_h, img_w), dtype=np.uint8); region_type = region.get("type", "rect")
                 if region_type == "rect" and all(k in region for k in ['x', 'y', 'w', 'h']):
                     x, y, w, h = int(region["x"]), int(region["y"]), int(region["w"]), int(region["h"])
                     if w > 0 and h > 0: cv2.rectangle(single_mask_np, (x, y), (x + w, y + h), 255, -1)
                 elif region_type == "poly" and "points" in region and len(region["points"]) >= 3:
-                    pts = np.array([[p['x'], p['y']] for p in region["points"]], np.int32).reshape((-1, 1, 2))
-                    cv2.fillPoly(single_mask_np, [pts], 255)
+                    pts = np.array([[p['x'], p['y']] for p in region["points"]], np.int32).reshape((-1, 1, 2)); cv2.fillPoly(single_mask_np, [pts], 255)
                 mask_list.append(torch.from_numpy(single_mask_np.astype(np.float32) / 255.0))
             if not mask_list: return (torch.zeros((1, img_h, img_w)), 0, image)
             return (torch.stack(mask_list).to(image.device), len(mask_list), image)
         print(f"### LayoutExtractor: Layout for '{filename}' not in index. Falling back to color detection. ###")
-        base_img_cv2 = (image[0].cpu().numpy() * 255).astype(np.uint8)
-        frame_color = np.array(self.hex_to_rgb(frame_color_hex))
-        lower, upper = np.maximum(0, frame_color - color_tolerance), np.minimum(255, frame_color + color_tolerance)
-        color_mask = cv2.inRange(base_img_cv2, lower, upper)
-        closed_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, np.ones((gap_closing_scale, gap_closing_scale), np.uint8))
-        final_frame_mask = cv2.dilate(closed_mask, np.ones((final_line_thickness, final_line_thickness), np.uint8), iterations=1)
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(final_frame_mask, 4, cv2.CV_32S)
-        panels_meta = [{'label_index': i, 'box': (stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP]), 'area': stats[i, cv2.CC_STAT_AREA]} for i in range(1, num_labels) if stats[i, cv2.CC_STAT_AREA] > min_area]
+        base_img_cv2 = (image[0].cpu().numpy() * 255).astype(np.uint8); frame_color = np.array(self.hex_to_rgb(frame_color_hex)); lower, upper = np.maximum(0, frame_color - color_tolerance), np.minimum(255, frame_color + color_tolerance); color_mask = cv2.inRange(base_img_cv2, lower, upper); closed_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, np.ones((gap_closing_scale, gap_closing_scale), np.uint8)); final_frame_mask = cv2.dilate(closed_mask, np.ones((final_line_thickness, final_line_thickness), np.uint8), iterations=1); num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(final_frame_mask, 4, cv2.CV_32S); panels_meta = [{'label_index': i, 'box': (stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP]), 'area': stats[i, cv2.CC_STAT_AREA]} for i in range(1, num_labels) if stats[i, cv2.CC_STAT_AREA] > min_area];
         if not panels_meta: return (torch.zeros((1, img_h, img_w), device=image.device), 0, image)
         if sort_panels_by == "largest-first": panels_meta.sort(key=lambda item: item['area'], reverse=True)
         elif sort_panels_by == "top-to-bottom": panels_meta.sort(key=lambda item: (item['box'][1], item['box'][0]))
         else: panels_meta.sort(key=lambda item: (item['box'][0], item['box'][1]))
-        mask_list = [torch.from_numpy((labels == item['label_index']).astype(np.float32)) for item in panels_meta[:MAX_PANELS]]
-        return (torch.stack(mask_list).to(image.device), len(mask_list), image)
+        mask_list = [torch.from_numpy((labels == item['label_index']).astype(np.float32)) for item in panels_meta[:MAX_PANELS]]; return (torch.stack(mask_list).to(image.device), len(mask_list), image)
 
 # --------------------------------------------------------------------
-# ★ Node 7: LoadMangaFromOutput (outputフォルダをスキャンする新ローダー) ★
+# Node 7: LoadMangaFromOutput (index.jsonからプロンプト読み込み)
 # --------------------------------------------------------------------
 class LoadMangaFromOutput:
     @classmethod
     def INPUT_TYPES(s):
         output_dir = folder_paths.get_output_directory()
         image_paths = []
-        # outputフォルダ内のサブフォルダも含めて再帰的に検索
+        if not os.path.exists(output_dir): return {"required": {"image": ([],)}}
         for root, _, files in os.walk(output_dir):
             for file in files:
                 if file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
-                    # outputディレクトリからの相対パスを作成
                     relative_path = os.path.relpath(os.path.join(root, file), output_dir)
                     image_paths.append(relative_path)
-        
-        # 新しいものが上に来るように逆順ソート
         image_paths.sort(reverse=True)
-        
         return {"required": {"image": (image_paths,)}}
 
     CATEGORY = "Manga Toolbox/Upscale Utils"
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("image", "image_path")
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("image", "image_path", "prompt_text")
     FUNCTION = "load_image"
 
     def load_image(self, image):
-        # image引数にはoutputフォルダからの相対パスが入っている
-        image_path = os.path.join(folder_paths.get_output_directory(), image)
+        # ★★★ ここが修正箇所です ★★★
+        # get_annotated_filepath は予期せず input フォルダを探すことがあるため、
+        # output フォルダのパスと相対パスを直接結合して、絶対パスを確実に生成します。
+        image_path_full = os.path.join(folder_paths.get_output_directory(), image)
         
-        i = Image.open(image_path)
+        # index.jsonのキーとして使用するファイル名は、サブフォルダを含まない純粋なファイル名です。
+        filename = os.path.basename(image)
+        
+        prompt_text = ""
+        
+        if os.path.exists(INDEX_FILE):
+            try:
+                with index_lock:
+                    with open(INDEX_FILE, 'r', encoding='utf-8') as f:
+                        index_data = json.load(f)
+                
+                if filename in index_data:
+                    entry = index_data[filename]
+                    if isinstance(entry, dict) and "prompt" in entry:
+                        prompt_text = entry["prompt"]
+                        print(f"### LoadMangaFromOutput: Found prompt for '{filename}' in index file. ###")
+                    else:
+                        print(f"### LoadMangaFromOutput: Entry for '{filename}' found in index, but no prompt data (or is old format). ###")
+            except Exception as e:
+                print(f"### LoadMangaFromOutput: Error reading index file: {e} ###")
+        
+        if not os.path.exists(image_path_full):
+            raise FileNotFoundError(f"[MangaToolbox] Image not found at the constructed path: {image_path_full}. Please check if the file exists in your output directory.")
+
+        i = Image.open(image_path_full)
         i = i.convert("RGB")
         image_tensor = pil_to_tensor(i)
         
-        # 重要なのは、LayoutExtractorに渡すために「相対パス」を返すこと
-        return (image_tensor, image)
+        return (image_tensor, image, prompt_text)
 
 # --------------------------------------------------------------------
-# ★ Node 8: FinalAssembler_Manga (panel_index を受け取るように修正) ★
+# Node 8: FinalAssembler_Manga (Legacy)
 # --------------------------------------------------------------------
 class FinalAssembler_Manga:
     @classmethod
-    def INPUT_TYPES(s):
-        return {"required": {
-                    "base_image": ("IMAGE",),
-                    "upscaled_panel": ("IMAGE",), # 単一のパネルを受け取るように変更
-                    "mask_batch": ("MASK",),
-                    "panel_index": ("INT", {"default": 1, "min": 1}), # panel_index を追加
-                }}
-    
-    RETURN_TYPES = ("IMAGE",)
-    FUNCTION = "assemble_final"
-    CATEGORY = "Manga Toolbox/Upscale Utils"
-
+    def INPUT_TYPES(s): return {"required": { "base_image": ("IMAGE",), "upscaled_panel": ("IMAGE",), "mask_batch": ("MASK",), "panel_index": ("INT", {"default": 1, "min": 1}), }}
+    RETURN_TYPES, FUNCTION, CATEGORY = ("IMAGE",), "assemble_final", "Manga Toolbox/Upscale Utils"
     def assemble_final(self, base_image, upscaled_panel, mask_batch, panel_index):
-        # base_imageはバッチかもしれないので、最初の1枚をキャンバスとして使用
-        canvas = base_image[0].clone()
-        
-        # upscaled_panelもバッチかもしれないので、最初の1枚を使用
-        panel_to_paste = upscaled_panel[0]
-
-        index = panel_index - 1 # 0-based index
-
-        if index < 0 or index >= len(mask_batch):
-            print(f"Error: panel_index ({panel_index}) is out of bounds for mask_batch with size {len(mask_batch)}.")
-            return (base_image,) # エラー時は元画像をそのまま返す
-
-        mask = mask_batch[index]
-
-        coords = torch.nonzero(mask, as_tuple=False)
+        canvas = base_image[0].clone(); panel_to_paste = upscaled_panel[0]; index = panel_index - 1
+        if index < 0 or index >= len(mask_batch): print(f"Error: panel_index ({panel_index}) out of bounds."); return (base_image,)
+        mask = mask_batch[index]; coords = torch.nonzero(mask, as_tuple=False)
         if coords.shape[0] == 0: return (canvas.unsqueeze(0),)
-
         y1, y2, x1, x2 = coords[:, 0].min(), coords[:, 0].max(), coords[:, 1].min(), coords[:, 1].max()
-        h, w = y2 - y1 + 1, x2 - x1 + 1
+        h, w = y2 - y1 + 1, x2 - x1 + 1;
         if h <= 0 or w <= 0: return (canvas.unsqueeze(0),)
-        
-        # panel_to_paste はすでに torch.Tensor なので permute と unsqueeze で次元を合わせる
         resized_image = F.interpolate(panel_to_paste.permute(2, 0, 1).unsqueeze(0), size=(h.item(), w.item()), mode='bilinear', align_corners=False).squeeze(0).permute(1, 2, 0)
-
-        target_region = canvas[y1:y2+1, x1:x2+1]
-        sub_mask = mask[y1:y2+1, x1:x2+1].unsqueeze(-1)
+        target_region = canvas[y1:y2+1, x1:x2+1]; sub_mask = mask[y1:y2+1, x1:x2+1].unsqueeze(-1)
         pasted_region = torch.where(sub_mask > 0.5, resized_image, target_region)
-        canvas[y1:y2+1, x1:x2+1] = pasted_region
-            
-        return (canvas.unsqueeze(0),)
+        canvas[y1:y2+1, x1:x2+1] = pasted_region; return (canvas.unsqueeze(0),)
 
 # --------------------------------------------------------------------
-# ★ Node 9: PanelUpscalerForHires (新規追加) ★
+# Node 9: PanelUpscalerForHires
 # --------------------------------------------------------------------
 class PanelUpscalerForHires:
     @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "base_target_width": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}),
-                "base_target_height": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}),
-                "final_upscale_factor": ("FLOAT", {"default": 1.7, "min": 1.0, "max": 8.0, "step": 0.1}),
-                "fit_mode": (["Match Area (Optimal)", "Fit Within (Safe)", "Fill Outside (Max Stretch)"],),
-                "interpolation": (["bicubic", "bilinear", "nearest-exact"],),
-            }
-        }
-    
-    RETURN_TYPES = ("IMAGE",)
-    FUNCTION = "scale"
-    CATEGORY = "Manga Toolbox/Upscale Utils"
-
+    def INPUT_TYPES(s): return { "required": { "image": ("IMAGE",), "base_target_width": ("INT", {"default": 1024}), "base_target_height": ("INT", {"default": 1024}), "final_upscale_factor": ("FLOAT", {"default": 1.7, "min": 1.0, "step": 0.1}), "fit_mode": (["Match Area (Optimal)", "Fit Within (Safe)", "Fill Outside (Max Stretch)"],), "interpolation": (["bicubic", "bilinear", "nearest-exact"],), } }
+    RETURN_TYPES, FUNCTION, CATEGORY = ("IMAGE",), "scale", "Manga Toolbox/Upscale Utils"
     def scale(self, image, base_target_width, base_target_height, final_upscale_factor, fit_mode, interpolation):
-        if image.shape[0] == 0:
-            return (image,)
-
-        # バッチの最初の画像で計算
-        first_image = image[0]
-        current_pixel_h, current_pixel_w = first_image.shape[0], first_image.shape[1]
-
-        if current_pixel_w == 0 or current_pixel_h == 0:
-            return (image,)
-
-        # Step 1: 理想的な生成サイズまでのスケール係数を計算 (LatentTargetScalerのロジック)
+        if image.shape[0] == 0: return (image,)
+        first_image = image[0]; current_pixel_h, current_pixel_w = first_image.shape[0], first_image.shape[1]
+        if current_pixel_w == 0 or current_pixel_h == 0: return (image,)
         scale_to_hit_target = 1.0
-        if fit_mode == "Fit Within (Safe)":
-            scale_w = base_target_width / current_pixel_w
-            scale_h = base_target_height / current_pixel_h
-            scale_to_hit_target = min(scale_w, scale_h)
-        elif fit_mode == "Fill Outside (Max Stretch)":
-            scale_w = base_target_width / current_pixel_w
-            scale_h = base_target_height / current_pixel_h
-            scale_to_hit_target = max(scale_w, scale_h)
-        elif fit_mode == "Match Area (Optimal)":
-            target_area = base_target_width * base_target_height
-            current_area = current_pixel_w * current_pixel_h
-            if current_area > 0:
-                scale_to_hit_target = (target_area / current_area) ** 0.5
-        
-        # Step 2: 最終的なスケール係数を決定
-        total_scale = scale_to_hit_target * final_upscale_factor
-
-        final_w = int(current_pixel_w * total_scale)
-        final_h = int(current_pixel_h * total_scale)
-
-        # PyTorchの補間は (N, C, H, W) の形式を期待する
-        img_tensor_chw = image.permute(0, 3, 1, 2)
-        
-        upscaled_tensor_chw = F.interpolate(img_tensor_chw, size=(final_h, final_w), mode=interpolation)
-        
-        # 元の (N, H, W, C) 形式に戻す
+        if fit_mode == "Fit Within (Safe)": scale_to_hit_target = min(base_target_width / current_pixel_w, base_target_height / current_pixel_h)
+        elif fit_mode == "Fill Outside (Max Stretch)": scale_to_hit_target = max(base_target_width / current_pixel_w, base_target_height / current_pixel_h)
+        elif fit_mode == "Match Area (Optimal)": target_area, current_area = base_target_width * base_target_height, current_pixel_w * current_pixel_h; scale_to_hit_target = (target_area / current_area) ** 0.5 if current_area > 0 else 1.0
+        total_scale = scale_to_hit_target * final_upscale_factor; final_w, final_h = int(current_pixel_w * total_scale), int(current_pixel_h * total_scale)
+        img_tensor_chw = image.permute(0, 3, 1, 2); upscaled_tensor_chw = F.interpolate(img_tensor_chw, size=(final_h, final_w), mode=interpolation)
         upscaled_tensor_hwc = upscaled_tensor_chw.permute(0, 2, 3, 1)
-
-        print(f"PanelUpscaler: Scaled from {current_pixel_w}x{current_pixel_h} -> {final_w}x{final_h}")
-        return (upscaled_tensor_hwc,)
+        print(f"PanelUpscaler: Scaled from {current_pixel_w}x{current_pixel_h} -> {final_w}x{final_h}"); return (upscaled_tensor_hwc,)
 
 # --------------------------------------------------------------------
-# ★ Node 10: ProgressiveUpscaleAssembler (新規追加) ★
+# Node 10: ProgressiveUpscaleAssembler
 # --------------------------------------------------------------------
 class ProgressiveUpscaleAssembler:
     temp_dir = os.path.join(folder_paths.get_output_directory(), "manga_upscale_temp")
-
     @classmethod
-    def INPUT_TYPES(s):
-        return {"required": {
-                    "base_image": ("IMAGE",),
-                    "upscaled_panel": ("IMAGE",),
-                    "mask_batch": ("MASK",),
-                    "panel_index": ("INT", {"default": 1, "min": 1}),
-                    "job_id": ("STRING", {"default": "upscale_job_01"}),
-                }}
-    
-    RETURN_TYPES = ("IMAGE",)
-    FUNCTION = "assemble_progressively"
-    CATEGORY = "Manga Toolbox/Upscale Utils"
-
+    def INPUT_TYPES(s): return {"required": { "base_image": ("IMAGE",), "upscaled_panel": ("IMAGE",), "mask_batch": ("MASK",), "panel_index": ("INT", {"default": 1, "min": 1}), "job_id": ("STRING", {"default": "upscale_job_01"}), }}
+    RETURN_TYPES, FUNCTION, CATEGORY = ("IMAGE",), "assemble_progressively", "Manga Toolbox/Upscale Utils"
     def assemble_progressively(self, base_image, upscaled_panel, mask_batch, panel_index, job_id):
-        job_dir = os.path.join(self.temp_dir, job_id)
-        os.makedirs(job_dir, exist_ok=True)
-        progress_file_path = os.path.join(job_dir, "progress.png")
-
-        canvas_tensor = None
-
-        # 1コマ目か、途中経過ファイルが存在しない場合はbase_imageから開始
+        job_dir = os.path.join(self.temp_dir, job_id); os.makedirs(job_dir, exist_ok=True)
+        progress_file_path = os.path.join(job_dir, "progress.png"); canvas_tensor = None
         if panel_index == 1 or not os.path.exists(progress_file_path):
-            if panel_index == 1:
-                # 1コマ目なら、過去の同名ジョブをクリーンアップ
-                if os.path.exists(job_dir):
-                    shutil.rmtree(job_dir)
-                    os.makedirs(job_dir, exist_ok=True)
+            if panel_index == 1 and os.path.exists(job_dir): shutil.rmtree(job_dir); os.makedirs(job_dir, exist_ok=True)
             canvas_tensor = base_image[0].clone()
         else:
-            # 2コマ目以降は、途中経過ファイルを読み込む
-            loaded_img = Image.open(progress_file_path).convert("RGB")
-            canvas_tensor = pil_to_tensor(loaded_img)[0].to(base_image.device)
-
-        # --- 合成処理 (FinalAssemblerと同じ) ---
-        panel_to_paste = upscaled_panel[0]
-        index = panel_index - 1
-
-        if index < 0 or index >= len(mask_batch):
-            print(f"Error: panel_index ({panel_index}) is out of bounds for mask_batch with size {len(mask_batch)}.")
-            return (canvas_tensor.unsqueeze(0),)
-
-        mask = mask_batch[index]
-        coords = torch.nonzero(mask, as_tuple=False)
+            loaded_img = Image.open(progress_file_path).convert("RGB"); canvas_tensor = pil_to_tensor(loaded_img)[0].to(base_image.device)
+        panel_to_paste = upscaled_panel[0]; index = panel_index - 1
+        if index < 0 or index >= len(mask_batch): print(f"Error: panel_index ({panel_index}) out of bounds."); return (canvas_tensor.unsqueeze(0),)
+        mask = mask_batch[index]; coords = torch.nonzero(mask, as_tuple=False);
         if coords.shape[0] == 0: return (canvas_tensor.unsqueeze(0),)
-
-        y1, y2, x1, x2 = coords[:, 0].min(), coords[:, 0].max(), coords[:, 1].min(), coords[:, 1].max()
-        h, w = y2 - y1 + 1, x2 - x1 + 1
+        y1, y2, x1, x2 = coords[:, 0].min(), coords[:, 0].max(), coords[:, 1].min(), coords[:, 1].max(); h, w = y2 - y1 + 1, x2 - x1 + 1
         if h <= 0 or w <= 0: return (canvas_tensor.unsqueeze(0),)
-        
         resized_image = F.interpolate(panel_to_paste.permute(2, 0, 1).unsqueeze(0), size=(h.item(), w.item()), mode='bilinear', align_corners=False).squeeze(0).permute(1, 2, 0)
-
-        target_region = canvas_tensor[y1:y2+1, x1:x2+1]
-        sub_mask = mask[y1:y2+1, x1:x2+1].unsqueeze(-1)
+        target_region = canvas_tensor[y1:y2+1, x1:x2+1]; sub_mask = mask[y1:y2+1, x1:x2+1].unsqueeze(-1)
         pasted_region = torch.where(sub_mask > 0.5, resized_image, target_region)
-        canvas_tensor[y1:y2+1, x1:x2+1] = pasted_region
-        
-        final_image_tensor = canvas_tensor.unsqueeze(0)
-
-        # --- 途中経過を保存 ---
+        canvas_tensor[y1:y2+1, x1:x2+1] = pasted_region; final_image_tensor = canvas_tensor.unsqueeze(0)
         tensor_to_pil(final_image_tensor).save(progress_file_path)
-        print(f"Saved upscale progress for job '{job_id}' (panel {panel_index})")
-
-        return (final_image_tensor,)
-
+        print(f"Saved upscale progress for job '{job_id}' (panel {panel_index})"); return (final_image_tensor,)
 
 # --------------------------------------------------------------------
-# ★★★ 新規追加ノード: PanelArrangerForI2I ★★★
+# Node 11: PanelArrangerForI2I
 # --------------------------------------------------------------------
 class PanelArrangerForI2I:
     PRESET_FILES = ["(Manual Canvas)"] + get_preset_files()
-    
     @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "preset": (s.PRESET_FILES, ),
-                "width": ("INT", {"default": 768, "min": 64, "max": 8192, "step": 8}),
-                "height": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}),
-                "frame_color_hex": ("STRING", {"default": "#FFFFFF"}),
-                "background_color_hex": ("STRING", {"default": "#000000"}),
-                "arrangement_json": ("STRING", {"multiline": True, "default": '{"regions":[], "images":[]}', "widget": "hidden"}),
-                "save_preset_as": ("STRING", {"default": ""}),
-            }
-        }
-
-    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "INT", "STRING")
+    def INPUT_TYPES(s): return { "required": { "preset": (s.PRESET_FILES, ), "width": ("INT", {"default": 768, "min": 64, "max": 8192, "step": 8}), "height": ("INT", {"default": 1024, "min": 64, "max": 8192, "step": 8}), "frame_color_hex": ("STRING", {"default": "#FFFFFF"}), "background_color_hex": ("STRING", {"default": "#000000"}), "arrangement_json": ("STRING", {"multiline": True, "default": '{"regions":[], "images":[]}', "widget": "hidden"}), "save_preset_as": ("STRING", {"default": ""}), } }
+    RETURN_TYPES, FUNCTION, CATEGORY = ("IMAGE", "MASK", "IMAGE", "INT", "STRING"), "create_arrangement", "Manga Toolbox"
     RETURN_NAMES = ("layout_image", "mask_batch", "init_image_for_i2i", "panel_count", "arrangement_json")
-    FUNCTION = "create_arrangement"
-    CATEGORY = "Manga Toolbox"
-
-    def hex_to_rgb_pil(self, h):
-        h = h.lstrip('#')
-        return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
-
+    def hex_to_rgb_pil(self, h): h = h.lstrip('#'); return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
     def create_arrangement(self, preset, width, height, frame_color_hex, background_color_hex, arrangement_json, save_preset_as):
-        # プリセット保存ロジック（変更なし）
         if save_preset_as:
-            filename = re.sub(r'[\\/*?:"<>|]', "", save_preset_as)
+            filename = re.sub(r'[\\/*?:"<>|]', "", save_preset_as);
             if not filename.endswith('.json'): filename += '.json'
             save_path = os.path.join(PRESET_DIR, filename)
             try:
-                parsed_data = json.loads(arrangement_json)
-                regions_only = parsed_data.get("regions", [])
+                parsed_data = json.loads(arrangement_json); regions_only = parsed_data.get("regions", [])
                 with open(save_path, 'w', encoding='utf-8') as f: json.dump(regions_only, f, indent=2, ensure_ascii=False)
                 print(f"### MangaInpaintToolbox: Saved panel layout preset to {filename} ###")
             except Exception as e: print(f"Error saving preset: {e}")
-
         final_arrangement_json = arrangement_json
-        # プリセット読み込みロジック（変更なし）
         if preset != "(Manual Canvas)":
             preset_path = os.path.join(PRESET_DIR, preset)
             if os.path.exists(preset_path):
                 print(f"### MangaInpaintToolbox: Loading preset: {preset} ###")
-                with open(preset_path, 'r', encoding='utf-8') as f:
-                    regions_from_preset = json.load(f)
-                    try: current_data = json.loads(arrangement_json)
-                    except json.JSONDecodeError: current_data = {"images": []}
-                    current_data["regions"] = regions_from_preset
-                    final_arrangement_json = json.dumps(current_data)
-        
-        try:
-            data = json.loads(final_arrangement_json)
-            regions = data.get("regions", [])
-            images_info = data.get("images", [])
-        except json.JSONDecodeError:
-            regions, images_info = [], []
-
-        bg_color = self.hex_to_rgb_pil(background_color_hex)
-        frame_color = self.hex_to_rgb_pil(frame_color_hex)
-
-        # 1. コマ割りレイアウト画像とマスクバッチの生成 (変更なし)
-        layout_pil = Image.new('RGB', (width, height), bg_color)
-        draw_layout = ImageDraw.Draw(layout_pil)
-        mask_list = []
+                with open(preset_path, 'r', encoding='utf-8') as f: regions_from_preset = json.load(f)
+                try: current_data = json.loads(arrangement_json)
+                except json.JSONDecodeError: current_data = {"images": []}
+                current_data["regions"] = regions_from_preset; final_arrangement_json = json.dumps(current_data)
+        try: data = json.loads(final_arrangement_json); regions, images_info = data.get("regions", []), data.get("images", [])
+        except json.JSONDecodeError: regions, images_info = [], []
+        bg_color, frame_color = self.hex_to_rgb_pil(background_color_hex), self.hex_to_rgb_pil(frame_color_hex)
+        layout_pil = Image.new('RGB', (width, height), bg_color); draw_layout = ImageDraw.Draw(layout_pil); mask_list = []
         for region in regions:
-            single_mask_pil = Image.new('L', (width, height), 0)
-            draw_mask = ImageDraw.Draw(single_mask_pil)
-            region_type = region.get("type", "rect")
+            single_mask_pil = Image.new('L', (width, height), 0); draw_mask = ImageDraw.Draw(single_mask_pil); region_type = region.get("type", "rect")
             if region_type == "rect":
                 x, y, w, h = [int(region.get(k, 0)) for k in ['x', 'y', 'w', 'h']]
-                if w > 0 and h > 0:
-                    draw_layout.rectangle([x, y, x + w, y + h], fill=frame_color)
-                    draw_mask.rectangle([x, y, x + w, y + h], fill=255)
+                if w > 0 and h > 0: draw_layout.rectangle([x, y, x + w, y + h], fill=frame_color); draw_mask.rectangle([x, y, x + w, y + h], fill=255)
             elif region_type == "poly":
                 pts = [(p['x'], p['y']) for p in region.get("points", [])]
-                if len(pts) >= 3:
-                    draw_layout.polygon(pts, fill=frame_color)
-                    draw_mask.polygon(pts, fill=255)
+                if len(pts) >= 3: draw_layout.polygon(pts, fill=frame_color); draw_mask.polygon(pts, fill=255)
             mask_list.append(torch.from_numpy(np.array(single_mask_pil, dtype=np.float32) / 255.0))
-
         layout_image_tensor = pil_to_tensor(layout_pil)
         if not mask_list:
-            empty_mask = torch.zeros((1, height, width), dtype=torch.float32)
-            return (layout_image_tensor, empty_mask, layout_image_tensor, 0, final_arrangement_json)
+            empty_mask = torch.zeros((1, height, width), dtype=torch.float32); return (layout_image_tensor, empty_mask, layout_image_tensor, 0, final_arrangement_json)
         mask_batch_tensor = torch.stack(mask_list)
-
-        # ★★★ ここからが修正箇所です ★★★
-        # 2. I2I用初期画像の生成ロジックを修正
-        #    黒いキャンバスから始めるのではなく、完成したレイアウト画像をコピーして、その上に画像を貼り付けます。
         init_image_pil = layout_pil.copy()
-
         for img_info in images_info:
             try:
                 image_path = folder_paths.get_annotated_filepath(img_info['src'])
-                if not os.path.exists(image_path):
-                    print(f"Warning: Image file not found: {img_info['src']}")
-                    continue
-                
-                # Pillowの画像は透過情報(A)を持つことがあるので、それを活かして貼り付ける
+                if not os.path.exists(image_path): print(f"Warning: Image file not found: {img_info['src']}"); continue
                 with Image.open(image_path).convert("RGBA") as img_to_place:
                     w, h = int(img_info['w']), int(img_info['h'])
-                    if w > 0 and h > 0:
-                        img_to_place = img_to_place.resize((w, h), Image.Resampling.LANCZOS)
-                    
-                    x, y = int(img_info['x']), int(img_info['y'])
-                    # RGBA画像の場合、第3引数に自身をマスクとして渡すことで透過部分が正しく処理される
-                    init_image_pil.paste(img_to_place, (x, y), img_to_place)
-            except Exception as e:
-                print(f"Error processing image {img_info.get('src', '')}: {e}")
-
-        # 3. テンソルに変換（以前の複雑な合成処理は不要になります）
+                    if w > 0 and h > 0: img_to_place = img_to_place.resize((w, h), Image.Resampling.LANCZOS)
+                    x, y = int(img_info['x']), int(img_info['y']); init_image_pil.paste(img_to_place, (x, y), img_to_place)
+            except Exception as e: print(f"Error processing image {img_info.get('src', '')}: {e}")
         init_image_tensor = pil_to_tensor(init_image_pil.convert("RGB"))
-        # ★★★ 修正箇所はここまで ★★★
-
         return (layout_image_tensor, mask_batch_tensor, init_image_tensor, len(mask_list), final_arrangement_json)

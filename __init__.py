@@ -1,5 +1,3 @@
-# /ComfyUI/custom_nodes/MangaInpaintToolbox/__init__.py
-
 from .nodes import (
     InteractivePanelCreator, MangaPanelDetector_Ultimate,
     CropPanelForInpaint_Advanced, ConditionalLatentScaler_Final,
@@ -10,8 +8,7 @@ from .nodes import (
     PanelArrangerForI2I,
 )
 
-WEB_DIRECTORY = "./js"
-WEB_EXTENSIONS = { "MangaInpaintToolbox": "/extensions/MangaInpaintToolbox/main.js", }
+WEB_DIRECTORY = "js"
 
 NODE_CLASS_MAPPINGS = {
     "InteractivePanelCreator_Manga": InteractivePanelCreator,
@@ -31,7 +28,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     # --- Generation Workflow ---
     "PanelArrangerForI2I_Manga": "① Arrange Panels for I2I",
-    "InteractivePanelCreator_Manga": "① Create Panel Layout (Legacy)", # 既存ノードをLegacyに
+    "InteractivePanelCreator_Manga": "① Create Panel Layout (Legacy)",
     "MangaPanelDetector_Ultimate": "① Detect Panels by Color",
     "CropPanelForInpaint_Advanced": "② Crop Panel (Shape Aware)",
     "LatentTargetScaler_Pro_Manga": "③ Latent Target Scaler (Pro)",
@@ -42,9 +39,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LoadMangaFromOutput_Manga":   "U-① Load Manga from OUTPUT",
     "LayoutExtractor_Ultimate":    "U-② Extract Layout from Image",
     "PanelUpscalerForHires_Manga": "U-③ Panel Upscaler for Hires",
-    "ProgressiveUpscaleAssembler_Manga": "U-④ Progressive Upscale Assembler", # <--- 新ノードの表示名
-    "FinalAssembler_Manga":        "Legacy/Assemble Upscaled Panel (Stateless)", # <--- 旧ノード
+    "ProgressiveUpscaleAssembler_Manga": "U-④ Progressive Upscale Assembler",
+    "FinalAssembler_Manga":        "Legacy/Assemble Upscaled Panel (Stateless)",
 }
 
-__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
-print("### Loading: Manga Inpaint Toolbox (with Progressive Upscaler) ###")
+__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
+print("### Loading: Manga Inpaint Toolbox (v3.5 with I2I Arranger & Prompt Loader) ###")
